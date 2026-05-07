@@ -136,13 +136,13 @@ def show_metrics_sidebar(metrics: dict):
     if not metrics:
         st.sidebar.info("未找到指标文件或为空。")
         return
-    st.sidebar.subheader("测试指标")
-    for key in ["RMSE", "MAE", "MAPE%", "R2"]:
-        if key in metrics:
-            st.sidebar.metric(f"test {key}", f"{metrics[key]:.4f}")
-    for key in ["val_RMSE", "val_MAE", "val_MAPE%", "val_R2"]:
-        if key in metrics:
-            st.sidebar.metric(f"val {key.split('_',1)[1]}", f"{metrics[key]:.4f}")
+    with st.sidebar.expander("测试指标", expanded=True):
+        for key in ["RMSE", "MAE", "MAPE%", "R2"]:
+            if key in metrics:
+                st.metric(f"test {key}", f"{metrics[key]:.4f}")
+        for key in ["val_RMSE", "val_MAE", "val_MAPE%", "val_R2"]:
+            if key in metrics:
+                st.metric(f"val {key.split('_',1)[1]}", f"{metrics[key]:.4f}")
 
 
 def plot_loss_curve(metrics: dict):
@@ -230,6 +230,7 @@ def main():
         load_features.clear()
         load_model.clear()
         load_metrics.clear()
+        load_history.clear()
         status_placeholder.success("训练完成")
         progress_bar.progress(1.0)
 
@@ -265,31 +266,37 @@ def main():
         return
     # ========== 无数据判断结束 ==========
 
-    # 文件路径输入（默认指向 output_dir）
-    feature_path = Path(st.sidebar.text_input("特征文件路径", str(Path(output_dir) / "features_per_cycle.csv")))
-    model_path = Path(st.sidebar.text_input("模型文件路径", str(Path(output_dir) / "tcn_lstm_model.pt")))
-    metrics_path = Path(st.sidebar.text_input("指标文件路径", str(Path(output_dir) / "metrics.json")))
-
     # 选择历史记录以加载对应快照
     hist_df = load_history(Path(output_dir))
+    default_feature_path = Path(output_dir) / "features_per_cycle.csv"
+    default_model_path = Path(output_dir) / "tcn_lstm_model.pt"
+    default_metrics_path = Path(output_dir) / "metrics.json"
+
     if not hist_df.empty:
         run_options = hist_df["run_id"].tolist()
         selected_run = st.sidebar.selectbox("选择历史 run", run_options, index=0)
         run_dir = Path(output_dir) / f"run_{selected_run}"
         if (run_dir / "features_per_cycle.csv").exists():
-            feature_path = run_dir / "features_per_cycle.csv"
+            default_feature_path = run_dir / "features_per_cycle.csv"
         if (run_dir / "tcn_lstm_model.pt").exists():
-            model_path = run_dir / "tcn_lstm_model.pt"
+            default_model_path = run_dir / "tcn_lstm_model.pt"
         if (run_dir / "metrics.json").exists():
-            metrics_path = run_dir / "metrics.json"
+            default_metrics_path = run_dir / "metrics.json"
+    else:
+        selected_run = None
+
+    # 文件路径输入（默认指向 output_dir 或选择的 run 子目录）
+    feature_path = Path(st.sidebar.text_input("特征文件路径", str(default_feature_path)))
+    model_path = Path(st.sidebar.text_input("模型文件路径", str(default_model_path)))
+    metrics_path = Path(st.sidebar.text_input("指标文件路径", str(default_metrics_path)))
 
     # 兜底逻辑：核心文件缺失时读取最新run快照
     if not feature_path.exists():
-        if not hist_df.empty:
+        if hist_df is not None and not hist_df.empty:
             latest_run = hist_df["run_id"].iloc[0]
             feature_path = Path(output_dir) / f"run_{latest_run}" / "features_per_cycle.csv"
     if not model_path.exists():
-        if not hist_df.empty:
+        if hist_df is not None and not hist_df.empty:
             latest_run = hist_df["run_id"].iloc[0]
             model_path = Path(output_dir) / f"run_{latest_run}" / "tcn_lstm_model.pt"
 
@@ -307,19 +314,14 @@ def main():
     show_metrics_sidebar(metrics)
 
     all_sources = sorted(pred_df["source"].unique().tolist()) if not pred_df.empty else []
-    selected = st.sidebar.multiselect("选择电芯", all_sources, default=all_sources[:1] if all_sources else [])
 
-    if not selected:
-        st.info("请选择至少一个电芯。")
-        return
-
-    plot_features(feat_df, selected)
+    plot_features(feat_df, all_sources)
 
     col1, col2 = st.columns(2)
     with col1:
-        plot_prediction_curve(pred_df, selected)
+        plot_prediction_curve(pred_df, all_sources)
     with col2:
-        plot_error_scatter(pred_df, selected)
+        plot_error_scatter(pred_df, all_sources)
 
     plot_loss_curve(metrics)
     show_history(Path(output_dir))
