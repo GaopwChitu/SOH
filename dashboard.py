@@ -214,7 +214,7 @@ def main():
             status_placeholder.text(f"训练进度: {current}/{total} epoch, train_loss={train_loss:.6f}" + (f", val_loss={val_loss:.6f}" if val_loss is not None else ""))
 
         with st.spinner("训练中，请稍候..."):
-            metrics = train_and_eval(
+            metrics, run_id = train_and_eval(
                 data_path=Path(data_path),
                 output_dir=Path(output_dir),
                 window=int(window_cfg),
@@ -226,12 +226,44 @@ def main():
                 batch_size=int(batch_size),
                 progress_cb=progress_cb,
             )
-        # 清理缓存，确保读取最新输出
+        # 清理缓存 + 重新加载最新数据
         load_features.clear()
         load_model.clear()
         load_metrics.clear()
         status_placeholder.success("训练完成")
         progress_bar.progress(1.0)
+
+        # 训练完成后自动加载最新数据（文件在 run_xx/ 子目录下）
+        run_dir = Path(output_dir) / f"run_{run_id}"
+        feature_path = run_dir / "features_per_cycle.csv"
+        model_path = run_dir / "tcn_lstm_model.pt"
+        metrics_path = run_dir / "metrics.json"
+        feat_df = load_features(feature_path)
+        model, window_loaded, norm = load_model(model_path)
+        metrics = load_metrics(metrics_path)
+        pred_df = build_predictions(feat_df, model, window_loaded, norm)
+
+    # ========== 无数据判断逻辑 ==========
+    output_dir_path = Path(output_dir)
+    has_data = False
+    if output_dir_path.exists():
+        run_files = list(output_dir_path.glob("run_*.json"))
+        core_files = [
+            output_dir_path / "features_per_cycle.csv",
+            output_dir_path / "tcn_lstm_model.pt"
+        ]
+        has_data = len(run_files) > 0 or all(f.exists() for f in core_files)
+
+    if not has_data and not submitted:
+        st.info("""
+        ### 暂无电池预测数据
+        请通过侧边栏的「训练配置」填写参数后点击「运行训练」，完成模型训练后即可查看：
+        1. 数据路径：填写电池数据集 CSV 文件/目录路径（默认：dataset/B05_discharge_soh.csv）
+        2. 输出路径：填写结果保存路径（默认：outputs）
+        3. 调整训练参数（窗口长度、训练轮数等）后点击运行
+        """)
+        return
+    # ========== 无数据判断结束 ==========
 
     # 文件路径输入（默认指向 output_dir）
     feature_path = Path(st.sidebar.text_input("特征文件路径", str(Path(output_dir) / "features_per_cycle.csv")))
@@ -239,11 +271,11 @@ def main():
     metrics_path = Path(st.sidebar.text_input("指标文件路径", str(Path(output_dir) / "metrics.json")))
 
     # 选择历史记录以加载对应快照
-    hist_df = load_history(Path(output_dir) / "logs")
+    hist_df = load_history(Path(output_dir))
     if not hist_df.empty:
         run_options = hist_df["run_id"].tolist()
         selected_run = st.sidebar.selectbox("选择历史 run", run_options, index=0)
-        run_dir = Path(output_dir) / "logs" / f"run_{selected_run}"
+        run_dir = Path(output_dir) / f"run_{selected_run}"
         if (run_dir / "features_per_cycle.csv").exists():
             feature_path = run_dir / "features_per_cycle.csv"
         if (run_dir / "tcn_lstm_model.pt").exists():
@@ -251,8 +283,18 @@ def main():
         if (run_dir / "metrics.json").exists():
             metrics_path = run_dir / "metrics.json"
 
+    # 兜底逻辑：核心文件缺失时读取最新run快照
+    if not feature_path.exists():
+        if not hist_df.empty:
+            latest_run = hist_df["run_id"].iloc[0]
+            feature_path = Path(output_dir) / f"run_{latest_run}" / "features_per_cycle.csv"
+    if not model_path.exists():
+        if not hist_df.empty:
+            latest_run = hist_df["run_id"].iloc[0]
+            model_path = Path(output_dir) / f"run_{latest_run}" / "tcn_lstm_model.pt"
+
     if not feature_path.exists() or not model_path.exists():
-        st.error("请确认特征文件和模型文件路径是否正确。")
+        st.error("请确认特征文件和模型文件路径是否正确，或先运行训练生成数据。")
         return
 
     feat_df = load_features(feature_path)
@@ -280,7 +322,7 @@ def main():
         plot_error_scatter(pred_df, selected)
 
     plot_loss_curve(metrics)
-    show_history(Path(output_dir) / "logs")
+    show_history(Path(output_dir))
 
 
 if __name__ == "__main__":

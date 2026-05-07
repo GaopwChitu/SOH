@@ -285,16 +285,6 @@ def predict_all(feat_df: pd.DataFrame, model: TcnLstmModel, window: int, norm: d
     return pd.DataFrame(rows)
 
 
-def save_per_source_outputs(output_dir: Path, feat_df: pd.DataFrame, pred_df: pd.DataFrame):
-    """Save features/predictions per source into numbered subfolders."""
-    for idx, src in enumerate(sorted(feat_df["source"].unique()), start=1):
-        subdir = output_dir / f"{idx:03d}_{src}"
-        subdir.mkdir(parents=True, exist_ok=True)
-        feat_df[feat_df["source"] == src].to_csv(subdir / "features.csv", index=False)
-        if not pred_df.empty:
-            pred_df[pred_df["source"] == src].to_csv(subdir / "predictions.csv", index=False)
-
-
 def eval_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     mae = np.mean(np.abs(y_true - y_pred))
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
@@ -316,16 +306,27 @@ def train_and_eval(
     weight_decay: float = 1e-4,
     batch_size: int = 32,
     progress_cb: Optional[Callable[[int, int, float, Optional[float]], None]] = None,
-):
+) -> Tuple[dict, str]:
+    """
+    Train the model and return (metrics_dict, run_id).
+    All output files are saved under output_dir/run_{run_id}/.
+    """
     global TRAIN_RATIO, VAL_RATIO
     TRAIN_RATIO = train_ratio
     VAL_RATIO = val_ratio
     feat_df = build_feature_table(data_path)
     output_dir.mkdir(parents=True, exist_ok=True)
-    feat_df.to_csv(output_dir / "features_per_cycle.csv", index=False)
+
+    # 创建 run_xx 子目录，后续所有文件直接保存到子目录下
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"run_{run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    feat_df.to_csv(run_dir / "features_per_cycle.csv", index=False)
+
     train_loader, val_loader, test_loader, norm = make_loaders(feat_df, window, batch_size)
     if train_loader is None:
-        return {}
+        return {}, run_id
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TcnLstmModel().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -399,24 +400,19 @@ def train_and_eval(
     if val_loss_hist:
         metrics["val_loss_history"] = val_loss_hist
 
-    torch.save({"model_state": model.state_dict(), "norm": norm, "window": window}, output_dir / "tcn_lstm_model.pt")
+    # 所有文件直接保存到 run_dir 下
+    torch.save({"model_state": model.state_dict(), "norm": norm, "window": window}, run_dir / "tcn_lstm_model.pt")
 
-    # 保存预测（总表 + 按 source 分类编号）
+    # 保存预测（总表）
     pred_df = predict_all(feat_df, model, window, norm)
     if not pred_df.empty:
-        pred_df.to_csv(output_dir / "predictions.csv", index=False)
-    save_per_source_outputs(output_dir, feat_df, pred_df)
+        pred_df.to_csv(run_dir / "predictions.csv", index=False)
 
-    with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
+    with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
-    # 写入日志记录（包含参数和时间戳），并保存快照便于历史查看
-    log_dir = output_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = log_dir / f"run_{run_id}.json"
-    run_dir = log_dir / f"run_{run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # 在 output_dir 根目录写入日志索引文件 run_xxx.json（不含大文件，仅参数+指标）
+    log_path = output_dir / f"run_{run_id}.json"
     run_info = {
         "run_id": run_id,
         "timestamp": datetime.now().isoformat(),
@@ -435,19 +431,9 @@ def train_and_eval(
     }
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(run_info, f, indent=2, ensure_ascii=False)
-    # 保存快照文件
-    for name in ["features_per_cycle.csv", "predictions.csv", "metrics.json", "tcn_lstm_model.pt"]:
-        src = output_dir / name
-        if src.exists():
-            shutil.copyfile(src, run_dir / name)
-    # 保存按 source 分类的子目录
-    for sub in output_dir.glob("0*_*"):
-        if sub.is_dir():
-            dest = run_dir / sub.name
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(sub, dest)
-    return metrics
+
+    # 不再复制文件到 run_dir，因为上面已直接保存到 run_dir
+    return metrics, run_id
 
 
 def parse_args():
@@ -473,7 +459,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    metrics = train_and_eval(
+    metrics, _ = train_and_eval(
         data_path=args.data_path,
         output_dir=args.output_dir,
         window=args.window,
