@@ -20,3 +20,6 @@ ENV/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 数据集
+dataset/
